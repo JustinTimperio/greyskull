@@ -1,65 +1,87 @@
 package main
 
 import (
-	"bufio"
-	"fmt"
-	"io/fs"
-	"io/ioutil"
-	"os"
-	"strings"
+	"crypto/rand"
+	"errors"
+
+	"github.com/cloudflare/circl/pke/kyber/kyber1024"
+	cli "github.com/urfave/cli/v2"
 )
 
-// createFile opens and writes bytes to a path
-func createFile(path string, fileBytes []byte, perms fs.FileMode) (err error) {
-	file, err := os.Create(path)
+// genKeys Gen Post Quantum Public and Private Keys
+func genKeys(seed []byte) (pubKey *kyber1024.PublicKey, privKey *kyber1024.PrivateKey, err error) {
+	// Get cryptographically secure rand stream from getrandom(2)
+	// TODO: Upgrade this in the future
+	r := rand.Reader
+
+	if seed == nil {
+		// Gen Kyber Keys
+		pubKey, privKey, err = kyber1024.GenerateKey(r)
+	} else {
+		pubKey, privKey = kyber1024.NewKeyFromSeed(seed)
+	}
+	return pubKey, privKey, err
+}
+
+// storeKeys writes a private and public key to ~/.greyskull
+func storeKeys(pubKey *kyber1024.PublicKey, privKey *kyber1024.PrivateKey, pubPath string, privPath string) (err error) {
+	var (
+		pubk  = make([]byte, int(kyber1024.PublicKeySize))
+		privk = make([]byte, int(kyber1024.PrivateKeySize))
+	)
+
+	pubKey.Pack(pubk)
+	err = createFile(pubPath, pubk, 0755)
 	if err != nil {
 		return err
 	}
-	defer file.Close()
-	os.Chmod(path, perms)
 
-	_, err = file.Write(fileBytes)
-	return err
-}
-
-// readFile reads a file from path and return bytes and error
-func readFile(path string) (fileBytes []byte, err error) {
-	return ioutil.ReadFile(path)
-}
-
-// pathExists returns whether the given file or directory exists
-func pathExists(path string) bool {
-	_, err := os.Stat(path)
-	if err == nil {
-		return true
+	privKey.Pack(privk)
+	err = createFile(privPath, privk, 0644)
+	if err != nil {
+		return err
 	}
-	if os.IsNotExist(err) {
-		return false
-	}
-	return false
+
+	return nil
 }
 
-// askForConfirmation asks the user for confirmation. A user must type in "yes" or "no" and
-// then press enter. It has fuzzy matching, so "y", "Y", "yes", "YES", and "Yes" all count as
-// confirmations. If the input is not recognized, it will ask again. The function does not return
-// until it gets a valid response from the user.
-func askForConfirmation(s string) bool {
-	reader := bufio.NewReader(os.Stdin)
+// CreateKyberKeys creates a set of Kyber keys and writes them to the disk
+func CreateKyberKeys(cCtx *cli.Context, homepath string, seed string) (err error) {
+	var (
+		pubKey   *kyber1024.PublicKey
+		privKey  *kyber1024.PrivateKey
+		pubPath  = homepath + "/" + cCtx.String("keyPath") + "/kyber.pub"
+		privPath = homepath + "/" + cCtx.String("keyPath") + "/kyber.priv"
+	)
 
-	for {
-		fmt.Printf("%s [y/n]: ", s)
-
-		response, err := reader.ReadString('\n')
-		if err != nil {
-			return false
-		}
-
-		response = strings.ToLower(strings.TrimSpace(response))
-
-		if response == "y" || response == "yes" {
-			return true
-		} else if response == "n" || response == "no" {
-			return false
+	// Make sure user doesn't overwrite their keys
+	if pathExists(pubPath) {
+		if !askForConfirmation("Do you want to overwrite your existing public key?") {
+			return errors.New("User aborted key creation")
 		}
 	}
+	if pathExists(privPath) {
+		if !askForConfirmation("Do you want to overwrite your existing private key?") {
+			return errors.New("User aborted key creation")
+		}
+	}
+
+	if seed != "" {
+		// NewKeyFromSeed will panic if seed length is not == KeySeedSize
+		if len(seed) != int(kyber1024.KeySeedSize) {
+			return errors.New("Key seed length is not 32 chars")
+		}
+		pubKey, privKey, err = genKeys([]byte(seed))
+	} else {
+		pubKey, privKey, err = genKeys(nil)
+	}
+	if err != nil {
+		return err
+	}
+
+	err = storeKeys(pubKey, privKey, pubPath, privPath)
+	if err != nil {
+		return err
+	}
+	return nil
 }
